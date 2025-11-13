@@ -936,7 +936,7 @@ def unified_analyze_cibil(data: Dict) -> Dict[str, Any]:
         inquiry_score * CIBIL_FACTORS['credit_inquiries']
     )
     
-    final_score = int(300 + (raw_score / 100.0) * 600)
+    final_score = int((raw_score / 100.0) * 600)
     
     # Determine status
     status = next((info['status'] for info in SCORE_RANGES.values() 
