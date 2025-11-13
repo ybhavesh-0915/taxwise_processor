@@ -935,7 +935,7 @@ def unified_analyze_cibil(data: Dict) -> Dict[str, Any]:
         dti_score * CIBIL_FACTORS['debt_to_income'] +
         inquiry_score * CIBIL_FACTORS['credit_inquiries']
     )
-    final_score = int(random.randint(100) + (raw_score / 100.0) * 600)
+    final_score = int((raw_score / 100.0) * 600)
     
     # Determine status
     status = next((info['status'] for info in SCORE_RANGES.values() 
@@ -1349,4 +1349,5 @@ if __name__ == "__main__":
         port=port,
         log_level="info"
     )
+
 
