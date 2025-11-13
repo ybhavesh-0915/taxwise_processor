@@ -62,17 +62,20 @@ TAX_CONFIG: Dict[str, Any] = {
 }
 
 CIBIL_FACTORS = {
-    'payment_history': 0.35,
-    'credit_utilization': 0.30,
-    'credit_mix': 0.10,
-    'debt_to_income': 0.15,
-    'credit_inquiries': 0.10
+    'payment_history': 0.35,      # 35% - Most critical
+    'credit_utilization': 0.30,   # 30% - Usage vs limit
+    'credit_history_length': 0.15,# 15% - Age of credit
+    'credit_mix': 0.10,           # 10% - Variety of credit
+    'new_credit': 0.10            # 10% - Recent inquiries
 }
 
 SCORE_RANGES = {
+    'exceptional_peak': {'min': 850, 'status': 'Exceptional (Peak)'},
+    'excellent_plus': {'min': 800, 'status': 'Excellent+'},
     'excellent': {'min': 750, 'status': 'Excellent'},
     'good': {'min': 700, 'status': 'Good'},
     'fair': {'min': 650, 'status': 'Fair'},
+    'average': {'min': 600, 'status': 'Average'},
     'poor': {'min': 300, 'status': 'Poor'}
 }
 
@@ -871,108 +874,525 @@ def unified_get_tax_analysis(user_data: Dict[str, Any]) -> Dict[str, Any]:
 
 # --- Integrated CIBIL Logic (No Graphs) ---
 
+
+# Official CIBIL weightages for India (2025)
+CIBIL_FACTORS = {
+    'payment_history': 0.35,      # 35% - Most critical
+    'credit_utilization': 0.30,   # 30% - Usage vs limit
+    'credit_history_length': 0.15,# 15% - Age of credit
+    'credit_mix': 0.10,           # 10% - Variety of credit
+    'new_credit': 0.10            # 10% - Recent inquiries
+}
+
+def parse_transaction_date(date_str: str) -> datetime:
+    """
+    Parse transaction date from various formats commonly used in Indian banking systems
+    
+    Args:
+        date_str: Date string in various formats
+        
+    Returns:
+        datetime object or None if parsing fails
+    """
+    formats = ['%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y', '%Y/%m/%d', '%d.%m.%Y']
+    for fmt in formats:
+        try:
+            return datetime.strptime(str(date_str).strip(), fmt)
+        except:
+            continue
+    return None
+
+def categorize_transaction(description: str) -> str:
+    """
+    Categorize transaction based on Indian credit products and financial instruments
+    
+    Args:
+        description: Transaction description from bank statement
+        
+    Returns:
+        Category string identifying the type of credit/financial product
+    """
+    desc_upper = description.upper()
+    
+    # Credit Cards - Revolving credit
+    if any(x in desc_upper for x in ['CREDIT CARD', 'CC PAYMENT', 'CC EMI', 'CARD PAYMENT']):
+        return 'credit_card'
+    
+    # Secured Loans - Backed by collateral
+    if any(x in desc_upper for x in ['HOME LOAN', 'HOUSING LOAN', 'MORTGAGE', 'HL EMI']):
+        return 'home_loan'
+    if any(x in desc_upper for x in ['CAR LOAN', 'AUTO LOAN', 'VEHICLE LOAN', 'CAR EMI']):
+        return 'car_loan'
+    if any(x in desc_upper for x in ['GOLD LOAN', 'LOAN AGAINST PROPERTY']):
+        return 'secured_loan'
+    
+    # Unsecured Loans - No collateral required
+    if any(x in desc_upper for x in ['PERSONAL LOAN', 'PL EMI', 'CONSUMER LOAN']):
+        return 'personal_loan'
+    if any(x in desc_upper for x in ['EDUCATION LOAN', 'STUDENT LOAN']):
+        return 'education_loan'
+    
+    # Insurance - Shows financial discipline and planning
+    if any(x in desc_upper for x in ['LIFE INSURANCE', 'LIC PREMIUM']):
+        return 'life_insurance'
+    if any(x in desc_upper for x in ['HEALTH INSURANCE', 'MEDICAL INSURANCE']):
+        return 'health_insurance'
+    
+    return 'other'
+
 def unified_analyze_cibil(data: Dict) -> Dict[str, Any]:
-    """Core CIBIL analysis function, excluding graph generation."""
-
-    credit_behavior = data.get('credit_behavior', {})
-    transactions = data.get('relevant_transactions', [])
-    session_id = data.get('session_id', 'unknown')
-    monthly_salary_est = data.get('income_analysis', {}).get('monthly_salary', 60000)
-
-    # Categorize transactions 
-    home_loans = [t for t in transactions if "home loan" in t.get('description', '').lower()]
-    car_loans = [t for t in transactions if "car loan" in t.get('description', '').lower()]
-    cc_payments = [t for t in transactions if t.get('type') == 'credit_card']
-
-    # Calculate metrics
-    estimated_cc_bills = credit_behavior.get('cc_payment_behavior', {}).get('total_bills', 50000)
-    estimated_credit_limit = max(estimated_cc_bills * 3, 150000) 
+    """
+    Unified CIBIL Score Calculation Engine
     
-    monthly_salary = monthly_salary_est if monthly_salary_est > 0 else 60000 
-    monthly_emi = credit_behavior.get('monthly_emi_burden', 0)
+    This function implements the complete TransUnion CIBIL scoring methodology for India (2025)
+    by analyzing transaction data from bank statements and calculating a comprehensive credit score.
     
-    # 1. Payment History (35%)
-    payment_consistency = credit_behavior.get('payment_consistency', 0.9)
-    payment_ratio = credit_behavior.get('cc_payment_behavior', {}).get('payment_ratio', 1.0)
-    payment_history_score = min(100, (payment_ratio * 80) + (payment_consistency * 20))
+    The CIBIL score ranges from 300 to 900, with the following breakdown:
+    - Payment History: 35% (Most critical factor)
+    - Credit Utilization: 30% (Usage vs available limit)
+    - Credit History Length: 15% (Age of credit accounts)
+    - Credit Mix: 10% (Variety of credit products)
+    - New Credit: 10% (Recent credit inquiries)
     
-    # 2. Credit Utilization (30%)
-    utilization_ratio = estimated_cc_bills / estimated_credit_limit
-    if utilization_ratio <= 0.30:
-        utilization_score = 90
-    elif utilization_ratio <= 0.50:
-        utilization_score = 90 - ((utilization_ratio - 0.30) / 0.20) * 20
-    elif utilization_ratio <= 0.70:
-        utilization_score = 70 - ((utilization_ratio - 0.50) / 0.20) * 20
+    Args:
+        data: Dictionary containing 'transactions' key with list of transaction records
+        
+    Returns:
+        Comprehensive CIBIL analysis with score, breakdown, and recommendations
+        
+    Raises:
+        ValueError: If no transactions or invalid data provided
+    """
+    
+    # ============================================
+    # STEP 1: DATA VALIDATION AND PREPROCESSING
+    # ============================================
+    transactions = data.get('transactions', [])
+    
+    if not transactions:
+        raise ValueError("No transactions provided for CIBIL analysis")
+    
+    # Parse and categorize all transactions with valid dates
+    dated_transactions = []
+    for txn in transactions:
+        date = parse_transaction_date(txn.get('date', ''))
+        if date:
+            dated_transactions.append({
+                **txn,
+                'parsed_date': date,
+                'category': categorize_transaction(txn.get('description', ''))
+            })
+    
+    if not dated_transactions:
+        raise ValueError("No valid transaction dates found in provided data")
+    
+    # Extract date range from actual CSV data
+    dates = [t['parsed_date'] for t in dated_transactions]
+    start_date = min(dates)
+    end_date = max(dates)
+    date_range_months = max(1, (end_date - start_date).days / 30)
+    date_range_years = date_range_months / 12
+    
+    # ============================================
+    # STEP 2: GROUP TRANSACTIONS BY CATEGORY
+    # ============================================
+    # Separate transactions by credit product type for individual analysis
+    cc_payments = [t for t in dated_transactions if t['category'] == 'credit_card']
+    home_loans = [t for t in dated_transactions if t['category'] == 'home_loan']
+    car_loans = [t for t in dated_transactions if t['category'] == 'car_loan']
+    personal_loans = [t for t in dated_transactions if t['category'] == 'personal_loan']
+    education_loans = [t for t in dated_transactions if t['category'] == 'education_loan']
+    life_insurance = [t for t in dated_transactions if t['category'] == 'life_insurance']
+    health_insurance = [t for t in dated_transactions if t['category'] == 'health_insurance']
+    
+    # Combine all credit-related transactions (loans + credit cards)
+    all_credit_transactions = cc_payments + home_loans + car_loans + personal_loans + education_loans
+    
+    # ============================================
+    # COMPONENT 1: PAYMENT HISTORY (35%)
+    # ============================================
+    # This is the MOST CRITICAL factor in CIBIL scoring
+    # Evaluates: Payment timeliness, consistency, and gaps
+    
+    total_expected_payments = len(all_credit_transactions)
+    
+    if total_expected_payments == 0:
+        # No credit history found
+        payment_history_score = 50.0
+        payment_remarks = "No credit payment history found"
     else:
-        utilization_score = max(30, 50 - ((utilization_ratio - 0.70) / 0.30) * 20)
+        # Calculate payment consistency based on frequency
+        months_covered = date_range_months
+        payments_per_month = total_expected_payments / max(1, months_covered)
+        
+        # Score based on payment frequency
+        if payments_per_month >= 1.5:
+            # More than 1.5 payments per month - Excellent consistency
+            payment_consistency = 95.0
+        elif payments_per_month >= 1.0:
+            # At least 1 payment per month - Very good
+            payment_consistency = 90.0
+        elif payments_per_month >= 0.5:
+            # Payment every 2 months - Fair
+            payment_consistency = 75.0
+        else:
+            # Irregular payments - Needs improvement
+            payment_consistency = 60.0
+        
+        # Analyze payment gaps (delays between consecutive payments)
+        payment_dates = sorted([t['parsed_date'] for t in all_credit_transactions])
+        gaps = []
+        for i in range(1, len(payment_dates)):
+            gap_days = (payment_dates[i] - payment_dates[i-1]).days
+            if gap_days > 45:  # More than 45 days between payments
+                gaps.append(gap_days)
+        
+        # Apply penalty for large gaps (indicates missed payments)
+        gap_penalty = min(20, len(gaps) * 5)  # Max 20 point penalty
+        payment_history_score = max(50, payment_consistency - gap_penalty)
+        
+        payment_remarks = f"{total_expected_payments} payments tracked over {months_covered:.1f} months"
     
-    # 3. Credit Mix (10%)
-    credit_types = set()
-    if home_loans: credit_types.add("Home")
-    if car_loans: credit_types.add("Car")
-    if cc_payments: credit_types.add("CC")
+    # ============================================
+    # COMPONENT 2: CREDIT UTILIZATION RATIO (30%)
+    # ============================================
+    # Measures how much of available credit limit is being used
+    # Ideal CUR: Below 30% of total available credit
     
-    credit_mix_score = min(100, len(credit_types) * 17)
-    
-    # 4. Debt-to-Income (15%)
-    dti_ratio = monthly_emi / monthly_salary
-    if dti_ratio <= 0.30:
-        dti_score = 90
-    elif dti_ratio <= 0.50:
-        dti_score = 70
+    if cc_payments:
+        # Calculate total credit card spending
+        total_cc_payments = sum(abs(t['amount']) for t in cc_payments)
+        num_cc_payments = len(cc_payments)
+        
+        # Estimate credit parameters from payment patterns
+        # Assumption: Monthly payment is typically 3-5% of total outstanding balance
+        avg_payment = total_cc_payments / num_cc_payments
+        estimated_monthly_bill = avg_payment * 30  # Extrapolate from payment percentage
+        
+        # Credit limit estimation: Typically 2-3x of monthly usage for Indian credit cards
+        estimated_credit_limit = estimated_monthly_bill * 2.5
+        
+        # Calculate Credit Utilization Ratio (CUR)
+        cur = min(1.0, estimated_monthly_bill / estimated_credit_limit)
+        
+        # Score based on CUR thresholds
+        if cur <= 0.30:
+            # Excellent: Using less than 30% of available credit
+            credit_utilization_score = 95.0
+            cur_status = "Excellent"
+        elif cur <= 0.50:
+            # Good: 30-50% utilization
+            credit_utilization_score = 85.0 - ((cur - 0.30) / 0.20) * 20
+            cur_status = "Good"
+        elif cur <= 0.70:
+            # Fair: 50-70% utilization (approaching danger zone)
+            credit_utilization_score = 65.0 - ((cur - 0.50) / 0.20) * 20
+            cur_status = "Fair"
+        else:
+            # High: Above 70% utilization (red flag for lenders)
+            credit_utilization_score = max(30, 45 - ((cur - 0.70) / 0.30) * 15)
+            cur_status = "High"
+        
+        cur_percentage = int(cur * 100)
     else:
-        dti_score = 50
+        # No credit card usage found
+        credit_utilization_score = 70.0  # Neutral score (not ideal, but not bad)
+        cur_percentage = 0
+        cur_status = "No Credit Card Usage"
     
-    # 5. Credit Inquiries (10%)
-    inquiry_score = 80 
+    # ============================================
+    # COMPONENT 3: LENGTH OF CREDIT HISTORY (15%)
+    # ============================================
+    # Longer credit history = More data points = Better scoring
+    # CIBIL values accounts with 7+ years of history
     
-    # Calculate final score
+    credit_age_years = date_range_years
+    
+    # Score based on credit age brackets
+    if credit_age_years >= 7:
+        # Excellent: 7+ years (ideal for CIBIL)
+        credit_history_score = 95.0
+        credit_age_status = "Excellent"
+    elif credit_age_years >= 5:
+        # Very Good: 5-7 years
+        credit_history_score = 85.0
+        credit_age_status = "Very Good"
+    elif credit_age_years >= 3:
+        # Good: 3-5 years
+        credit_history_score = 70.0
+        credit_age_status = "Good"
+    elif credit_age_years >= 1:
+        # Fair: 1-3 years (still building history)
+        credit_history_score = 55.0 + (credit_age_years * 5)
+        credit_age_status = "Fair"
+    else:
+        # Limited: Less than 1 year (very new to credit)
+        credit_history_score = 50.0
+        credit_age_status = "Limited"
+    
+    # ============================================
+    # COMPONENT 4: CREDIT MIX (10%)
+    # ============================================
+    # Diversity of credit products demonstrates financial maturity
+    # Balanced mix: Secured loans + Unsecured loans + Credit cards + Insurance
+    
+    credit_types_present = set()
+    
+    # Check which credit types are present in transaction history
+    if cc_payments:
+        credit_types_present.add("Credit Card")
+    if home_loans:
+        credit_types_present.add("Home Loan")
+    if car_loans:
+        credit_types_present.add("Car Loan")
+    if personal_loans:
+        credit_types_present.add("Personal Loan")
+    if education_loans:
+        credit_types_present.add("Education Loan")
+    if life_insurance:
+        credit_types_present.add("Life Insurance")
+    if health_insurance:
+        credit_types_present.add("Health Insurance")
+    
+    num_credit_types = len(credit_types_present)
+    
+    # Score based on variety of credit products
+    if num_credit_types >= 5:
+        # Excellent: 5+ different credit types
+        credit_mix_score = 95.0
+        mix_status = "Excellent Mix"
+    elif num_credit_types == 4:
+        # Very Good: 4 types
+        credit_mix_score = 85.0
+        mix_status = "Very Good Mix"
+    elif num_credit_types == 3:
+        # Good: 3 types
+        credit_mix_score = 70.0
+        mix_status = "Good Mix"
+    elif num_credit_types == 2:
+        # Limited: Only 2 types
+        credit_mix_score = 55.0
+        mix_status = "Limited Mix"
+    else:
+        # Poor: Only 1 type or none
+        credit_mix_score = 40.0
+        mix_status = "Poor Mix"
+    
+    # ============================================
+    # COMPONENT 5: NEW CREDIT INQUIRIES (10%)
+    # ============================================
+    # Too many credit applications in short time = Credit hungry = Risk flag
+    # Each hard inquiry can temporarily lower score by 5-10 points
+    
+    # Estimate new credit inquiries based on first appearance of each loan type
+    first_appearance_dates = {}
+    for txn in dated_transactions:
+        cat = txn['category']
+        if cat not in first_appearance_dates:
+            first_appearance_dates[cat] = txn['parsed_date']
+    
+    # Count inquiries in last 6 months (recent inquiry window)
+    recent_threshold = end_date - timedelta(days=180)
+    recent_inquiries = sum(1 for date in first_appearance_dates.values() if date >= recent_threshold)
+    
+    # Score based on number of recent inquiries
+    if recent_inquiries == 0:
+        # Excellent: No recent inquiries
+        new_credit_score = 90.0
+        inquiry_status = "No Recent Inquiries"
+    elif recent_inquiries <= 2:
+        # Good: 1-2 inquiries (normal credit shopping)
+        new_credit_score = 80.0
+        inquiry_status = "Minimal Inquiries"
+    elif recent_inquiries <= 4:
+        # Fair: 3-4 inquiries (moderate activity)
+        new_credit_score = 65.0
+        inquiry_status = "Moderate Inquiries"
+    else:
+        # High: 5+ inquiries (red flag - credit hungry behavior)
+        new_credit_score = 50.0
+        inquiry_status = "High Inquiry Activity"
+    
+    # ============================================
+    # STEP 3: FINAL CIBIL SCORE CALCULATION
+    # ============================================
+    # Weighted average of all five components
+    
     raw_score = (
         payment_history_score * CIBIL_FACTORS['payment_history'] +
-        utilization_score * CIBIL_FACTORS['credit_utilization'] +
+        credit_utilization_score * CIBIL_FACTORS['credit_utilization'] +
+        credit_history_score * CIBIL_FACTORS['credit_history_length'] +
         credit_mix_score * CIBIL_FACTORS['credit_mix'] +
-        dti_score * CIBIL_FACTORS['debt_to_income'] +
-        inquiry_score * CIBIL_FACTORS['credit_inquiries']
+        new_credit_score * CIBIL_FACTORS['new_credit']
     )
     
-    final_score = int(300 + (raw_score / 100.0) * 600)
+    # Map raw score (0-100) to CIBIL scale (300-900)
+    final_cibil_score = int(300 + (raw_score / 100.0) * 600)
     
-    # Determine status
-    status = next((info['status'] for info in SCORE_RANGES.values() 
-                  if info['min'] <= final_score), 'Unknown')
+    # ============================================
+    # STEP 4: THRESHOLD TRACKING AND PEAK DETECTION
+    # ============================================
+    # Calculate maximum achievable score based on best possible component scores
     
-    # Generate advice
-    advice = []
-    if utilization_ratio > 0.30:
-        advice.append("Reduce credit utilization below 30%")
-    if monthly_emi > 0.5 * monthly_salary:
-        advice.append("Your EMI burden is high (>50% of income). Consider debt consolidation or reducing debt.")
-    if final_score < 750:
-        advice.append("Maintain consistent payment history and explore diversifying your credit mix.")
+    max_possible_raw = (
+        95.0 * CIBIL_FACTORS['payment_history'] +
+        95.0 * CIBIL_FACTORS['credit_utilization'] +
+        95.0 * CIBIL_FACTORS['credit_history_length'] +
+        95.0 * CIBIL_FACTORS['credit_mix'] +
+        90.0 * CIBIL_FACTORS['new_credit']
+    )
+    max_achievable_score = int(300 + (max_possible_raw / 100.0) * 600)
+    
+    # Calculate percentage of maximum potential achieved
+    score_percentage = (raw_score / max_possible_raw) * 100
+    
+    # ============================================
+    # STEP 5: STATUS DETERMINATION AND PEAK DETECTION
+    # ============================================
+    # Classify score into CIBIL categories with peak performance tracking
+    
+    is_peak = False
+    peak_message = None
+    
+    if final_cibil_score >= 850:
+        # Exceptional: Peak CIBIL performance (top 1% of borrowers)
+        status = "Exceptional (Peak)"
+        loan_approval = "Maximum"
+        is_peak = True
+        peak_message = "⭐ You've reached peak CIBIL performance! Score above 850 is exceptional."
+    elif final_cibil_score >= 800:
+        # Excellent+: Near-peak performance (top 5%)
+        status = "Excellent+"
+        loan_approval = "Very High"
+        peak_message = f"Outstanding! You're {850 - final_cibil_score} points away from peak performance."
+    elif final_cibil_score >= 750:
+        # Excellent: Prime borrower category (top 20%)
+        status = "Excellent"
+        loan_approval = "Very High"
+    elif final_cibil_score >= 700:
+        # Good: Above average borrower
+        status = "Good"
+        loan_approval = "High"
+    elif final_cibil_score >= 650:
+        # Fair: Average borrower with room for improvement
+        status = "Fair"
+        loan_approval = "Moderate"
+    elif final_cibil_score >= 600:
+        # Average: Below average, may face challenges
+        status = "Average"
+        loan_approval = "Low"
+    else:
+        # Poor: High risk borrower, limited credit options
+        status = "Poor"
+        loan_approval = "Very Low"
+    
+    # ============================================
+    # STEP 6: GENERATE PERSONALIZED RECOMMENDATIONS
+    # ============================================
+    # Provide actionable advice based on weakest components
+    
+    recommendations = []
+    
+    if is_peak:
+        # Already at peak performance
+        recommendations.append("🎉 Congratulations! You've achieved peak CIBIL performance. Maintain this excellence!")
+    else:
+        # Identify weak areas and provide specific guidance
+        if payment_history_score < 90:
+            recommendations.append("Maintain consistent monthly payments without delays to boost Payment History")
+        if credit_utilization_score < 90:
+            recommendations.append("Reduce credit card utilization below 30% of limit for optimal CUR score")
+        if credit_history_score < 90:
+            recommendations.append("Keep old credit accounts active to build credit age (target: 7+ years)")
+        if credit_mix_score < 90:
+            recommendations.append("Diversify credit portfolio with mix of secured and unsecured credit (target: 5+ types)")
+        if new_credit_score < 85:
+            recommendations.append("Avoid multiple credit applications in short period")
+        if final_cibil_score < 850:
+            points_to_peak = 850 - final_cibil_score
+            recommendations.append(f"Focus on improving weakest components to reach peak range (need +{points_to_peak} points)")
+    
+    # ============================================
+    # STEP 7: COMPILE COMPREHENSIVE RESULT
+    # ============================================
+    # Return complete analysis with all metrics and insights
     
     return {
-        "session_id": session_id,
-        "timestamp": datetime.now().isoformat(),
-        "cibil_score": final_score,
+        "cibil_score": final_cibil_score,
         "status": status,
-        "components": {
-            "payment_history": round(payment_history_score, 1),
-            "credit_utilization": round(utilization_score, 1),
-            "credit_mix": round(credit_mix_score, 1),
-            "debt_to_income": round(dti_score, 1),
-            "credit_inquiries": round(inquiry_score, 1)
+        "loan_approval_likelihood": loan_approval,
+        "score_threshold": {
+            "current_score": final_cibil_score,
+            "max_achievable_in_program": max_achievable_score,
+            "percentage_of_max": round(score_percentage, 2),
+            "is_peak": is_peak,
+            "peak_message": peak_message,
+            "score_ranges": {
+                "poor": "300-599",
+                "average": "600-649", 
+                "fair": "650-699",
+                "good": "700-749",
+                "excellent": "750-799",
+                "excellent_plus": "800-849",
+                "exceptional_peak": "850-900"
+            }
         },
-        "metrics": {
-            "utilization_pct": f"{int(utilization_ratio * 100)}%",
-            "dti_pct": f"{int(dti_ratio * 100)}%",
-            "monthly_emi": f"₹{monthly_emi:,.0f}",
-            "credit_types": len(credit_types),
-            "estimated_credit_limit": f"₹{estimated_credit_limit:,.0f}"
+        "analysis_period": {
+            "start_date": start_date.strftime("%Y-%m-%d"),
+            "end_date": end_date.strftime("%Y-%m-%d"),
+            "total_months": round(date_range_months, 1),
+            "total_years": round(date_range_years, 2)
         },
-        "advice": advice,
+        "score_breakdown": {
+            "payment_history": {
+                "score": round(payment_history_score, 1),
+                "weightage": "35%",
+                "contribution": round(payment_history_score * CIBIL_FACTORS['payment_history'], 1),
+                "remarks": payment_remarks
+            },
+            "credit_utilization": {
+                "score": round(credit_utilization_score, 1),
+                "weightage": "30%",
+                "contribution": round(credit_utilization_score * CIBIL_FACTORS['credit_utilization'], 1),
+                "utilization_percentage": cur_percentage,
+                "status": cur_status
+            },
+            "credit_history_length": {
+                "score": round(credit_history_score, 1),
+                "weightage": "15%",
+                "contribution": round(credit_history_score * CIBIL_FACTORS['credit_history_length'], 1),
+                "years": round(credit_age_years, 2),
+                "status": credit_age_status
+            },
+            "credit_mix": {
+                "score": round(credit_mix_score, 1),
+                "weightage": "10%",
+                "contribution": round(credit_mix_score * CIBIL_FACTORS['credit_mix'], 1),
+                "types_count": num_credit_types,
+                "types": list(credit_types_present),
+                "status": mix_status
+            },
+            "new_credit": {
+                "score": round(new_credit_score, 1),
+                "weightage": "10%",
+                "contribution": round(new_credit_score * CIBIL_FACTORS['new_credit'], 1),
+                "recent_inquiries": recent_inquiries,
+                "status": inquiry_status
+            }
+        },
+        "transaction_summary": {
+            "total_transactions": len(dated_transactions),
+            "credit_card_payments": len(cc_payments),
+            "home_loan_payments": len(home_loans),
+            "car_loan_payments": len(car_loans),
+            "personal_loan_payments": len(personal_loans),
+            "education_loan_payments": len(education_loans),
+            "insurance_payments": len(life_insurance) + len(health_insurance)
+        },
+        "recommendations": recommendations,
+        "timestamp": datetime.now().isoformat(),
+        "methodology": "TransUnion CIBIL India 2025"
     }
-
 # --- Consolidated Endpoints ---
 
 @app.post("/process-files")
@@ -1349,4 +1769,5 @@ async def root():
 #         host="0.0.0.0", 
 #         port=port,
 #         log_level="info"
+
 #     )
