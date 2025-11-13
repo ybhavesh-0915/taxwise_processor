@@ -1542,27 +1542,39 @@ async def process_files(files: List[UploadFile] = File(...)):
 
 @app.get("/analyze-cibil/{session_id}")
 async def analyze_cibil_score_endpoint(session_id: str):
-    """Unified endpoint to run CIBIL analysis, returning the final score, components, and advice."""
-    if session_id not in PROCESSED_DATA_STORE:
-        raise HTTPException(status_code=404, detail="Session not found or expired")
-    
-    data: ProcessedFinancialData = PROCESSED_DATA_STORE[session_id]
-
-    cibil_transactions = [
-        t.to_dict() for t in data.transactions 
-        if t.type in [TransactionType.EMI, TransactionType.CREDIT_CARD]
-    ]
-
-    # Structure data for the core CIBIL logic
-    cibil_input_data = {
-        'session_id': session_id,
-        'credit_behavior': data.credit_behavior,
-        'relevant_transactions': cibil_transactions,
-        'income_analysis': data.income_analysis,
-    }
-    
-    result = unified_analyze_cibil(cibil_input_data)
-    return result
+    """Analyze CIBIL score based on actual CSV transaction data"""
+    try:
+        url = f"{DATA_PROCESSOR_BASE_URL}/cibil-data/{session_id}"
+        response = requests.get(url, timeout=30)
+        
+        if response.status_code == 404:
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        elif response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail="Failed to fetch data")
+        
+        data = response.json()
+        transactions = data.get('relevant_transactions', [])
+        
+        if not transactions:
+            raise HTTPException(status_code=400, detail="No transactions found in CSV")
+        
+        result = calculate_cibil_score(transactions)
+        
+        # Add metadata
+        result["session_id"] = session_id
+        result["timestamp"] = datetime.now().isoformat()
+        result["methodology"] = "TransUnion CIBIL India 2025"
+        
+        return result
+        
+    except requests.exceptions.ConnectionError:
+        raise HTTPException(status_code=503, detail="Cannot connect to data service")
+    except requests.exceptions.Timeout:
+        raise HTTPException(status_code=504, detail="Request timeout")
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/analyze-tax/{session_id}")
 async def analyze_tax_endpoint(session_id: str):
@@ -1771,3 +1783,4 @@ async def root():
 #         log_level="info"
 
 #     )
+
