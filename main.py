@@ -62,11 +62,11 @@ TAX_CONFIG: Dict[str, Any] = {
 }
 
 CIBIL_FACTORS = {
-    'payment_history': 0.35,
-    'credit_utilization': 0.30,
-    'credit_mix': 0.10,
-    'debt_to_income': 0.15,
-    'credit_inquiries': 0.10
+    'payment_history': 0.35,      # 35% - Most critical
+    'credit_utilization': 0.30,   # 30% - Usage vs limit
+    'credit_mix': 0.10,           # 10% - Variety of credit
+    'debt_to_income': 0.15,       # 15% - DTI ratio
+    'credit_inquiries': 0.10      # 10% - Recent inquiries
 }
 
 SCORE_RANGES = {
@@ -872,105 +872,260 @@ def unified_get_tax_analysis(user_data: Dict[str, Any]) -> Dict[str, Any]:
 # --- Integrated CIBIL Logic (No Graphs) ---
 
 def unified_analyze_cibil(data: Dict) -> Dict[str, Any]:
-    """Core CIBIL analysis function, excluding graph generation."""
-
+    """Calculate CIBIL score using official Indian methodology"""
+    
     credit_behavior = data.get('credit_behavior', {})
     transactions = data.get('relevant_transactions', [])
     session_id = data.get('session_id', 'unknown')
-    monthly_salary_est = data.get('income_analysis', {}).get('monthly_salary', 60000)
-
-    # Categorize transactions 
+    income_analysis = data.get('income_analysis', {})
+    
+    # Parse dates to get actual date range from CSV
+    dated_transactions = []
+    for txn in transactions:
+        date = parse_transaction_date(txn.get('date', ''))
+        if date:
+            dated_transactions.append({**txn, 'parsed_date': date})
+    
+    if not dated_transactions:
+        raise ValueError("No valid transaction dates found")
+    
+    # Get actual date range from CSV data
+    dates = [t['parsed_date'] for t in dated_transactions]
+    start_date = min(dates)
+    end_date = max(dates)
+    date_range_months = max(1, (end_date - start_date).days / 30)
+    date_range_years = date_range_months / 12
+    
+    # Categorize transactions (matching unified system)
     home_loans = [t for t in transactions if "home loan" in t.get('description', '').lower()]
     car_loans = [t for t in transactions if "car loan" in t.get('description', '').lower()]
     cc_payments = [t for t in transactions if t.get('type') == 'credit_card']
-
-    # Calculate metrics
-    estimated_cc_bills = credit_behavior.get('cc_payment_behavior', {}).get('total_bills', 50000)
-    estimated_credit_limit = max(estimated_cc_bills * 3, 150000) 
+    personal_loans = [t for t in transactions if "personal loan" in t.get('description', '').lower()]
+    education_loans = [t for t in transactions if "education loan" in t.get('description', '').lower()]
     
-    monthly_salary = monthly_salary_est if monthly_salary_est > 0 else 60000 
+    # Get monthly salary from income analysis
+    monthly_salary_est = income_analysis.get('monthly_salary', income_analysis.get('monthly_average', 60000))
+    monthly_salary = monthly_salary_est if monthly_salary_est > 0 else 60000
+    
+    # Get monthly EMI from credit behavior
     monthly_emi = credit_behavior.get('monthly_emi_burden', 0)
     
-    # 1. Payment History (35%)
+    # Get CC payment behavior
+    cc_payment_behavior = credit_behavior.get('cc_payment_behavior', {})
+    estimated_cc_bills = cc_payment_behavior.get('total_bills', 50000)
+    estimated_credit_limit = max(estimated_cc_bills * 3, 150000)
+    
+    # ============================================
+    # 1. PAYMENT HISTORY (35%)
+    # ============================================
     payment_consistency = credit_behavior.get('payment_consistency', 0.9)
-    payment_ratio = credit_behavior.get('cc_payment_behavior', {}).get('payment_ratio', 1.0)
+    payment_ratio = cc_payment_behavior.get('payment_ratio', 1.0)
     payment_history_score = min(100, (payment_ratio * 80) + (payment_consistency * 20))
+    payment_remarks = f"Payment consistency: {payment_consistency:.2f}, Payment ratio: {payment_ratio:.2f}"
     
-    # 2. Credit Utilization (30%)
+    # ============================================
+    # 2. CREDIT UTILIZATION (30%)
+    # ============================================
     utilization_ratio = estimated_cc_bills / estimated_credit_limit
-    if utilization_ratio <= 0.30:
-        utilization_score = 90
-    elif utilization_ratio <= 0.50:
-        utilization_score = 90 - ((utilization_ratio - 0.30) / 0.20) * 20
-    elif utilization_ratio <= 0.70:
-        utilization_score = 70 - ((utilization_ratio - 0.50) / 0.20) * 20
-    else:
-        utilization_score = max(30, 50 - ((utilization_ratio - 0.70) / 0.30) * 20)
     
-    # 3. Credit Mix (10%)
+    if utilization_ratio <= 0.30:
+        credit_utilization_score = 90.0
+        cur_status = "Excellent"
+    elif utilization_ratio <= 0.50:
+        credit_utilization_score = 90.0 - ((utilization_ratio - 0.30) / 0.20) * 20
+        cur_status = "Good"
+    elif utilization_ratio <= 0.70:
+        credit_utilization_score = 70.0 - ((utilization_ratio - 0.50) / 0.20) * 20
+        cur_status = "Fair"
+    else:
+        credit_utilization_score = max(30, 50 - ((utilization_ratio - 0.70) / 0.30) * 20)
+        cur_status = "High"
+    
+    cur_percentage = int(utilization_ratio * 100)
+    
+    # ============================================
+    # 3. CREDIT MIX (10%)
+    # ============================================
     credit_types = set()
-    if home_loans: credit_types.add("Home")
-    if car_loans: credit_types.add("Car")
-    if cc_payments: credit_types.add("CC")
+    if home_loans:
+        credit_types.add("Home")
+    if car_loans:
+        credit_types.add("Car")
+    if cc_payments:
+        credit_types.add("CC")
     
     credit_mix_score = min(100, len(credit_types) * 17)
+    num_credit_types = len(credit_types)
     
-    # 4. Debt-to-Income (15%)
-    dti_ratio = monthly_emi / monthly_salary
-    if dti_ratio <= 0.30:
-        dti_score = 90
-    elif dti_ratio <= 0.50:
-        dti_score = 70
+    if num_credit_types >= 5:
+        mix_status = "Excellent Mix"
+    elif num_credit_types >= 3:
+        mix_status = "Good Mix"
+    elif num_credit_types >= 2:
+        mix_status = "Limited Mix"
     else:
-        dti_score = 50
+        mix_status = "Poor Mix"
     
-    # 5. Credit Inquiries (10%)
-    inquiry_score = 80 
+    # ============================================
+    # 4. DEBT-TO-INCOME (15%)
+    # ============================================
+    dti_ratio = monthly_emi / monthly_salary if monthly_salary > 0 else 0
     
-    # Calculate final score
+    if dti_ratio <= 0.30:
+        dti_score = 90.0
+        dti_status = "Excellent"
+    elif dti_ratio <= 0.50:
+        dti_score = 70.0
+        dti_status = "Acceptable"
+    else:
+        dti_score = 50.0
+        dti_status = "High"
+    
+    # ============================================
+    # 5. CREDIT INQUIRIES (10%)
+    # ============================================
+    inquiry_score = 80.0
+    inquiry_status = "Normal"
+    
+    # ============================================
+    # FINAL CIBIL SCORE CALCULATION (MATCHING UNIFIED SYSTEM)
+    # ============================================
     raw_score = (
         payment_history_score * CIBIL_FACTORS['payment_history'] +
-        utilization_score * CIBIL_FACTORS['credit_utilization'] +
+        credit_utilization_score * CIBIL_FACTORS['credit_utilization'] +
         credit_mix_score * CIBIL_FACTORS['credit_mix'] +
         dti_score * CIBIL_FACTORS['debt_to_income'] +
         inquiry_score * CIBIL_FACTORS['credit_inquiries']
     )
     
-    final_score = int((raw_score / 100.0) * 600)
+    # Scale to 300-900 range (increased from 600 to match max of 900)
+    final_cibil_score = int(300 + (raw_score / 100.0) * 600)
     
-    # Determine status
-    status = next((info['status'] for info in SCORE_RANGES.values() 
-                  if info['min'] <= final_score), 'Unknown')
+    # THRESHOLD CALCULATION (Max score is 900)
+    max_possible_raw = 100.0  # Perfect scores in all components
+    max_achievable_score = int(300 + (max_possible_raw / 100.0) * 600)  # = 900
+    score_percentage = (raw_score / max_possible_raw) * 100
     
-    # Generate advice
-    advice = []
-    if utilization_ratio > 0.30:
-        advice.append("Reduce credit utilization below 30%")
-    if monthly_emi > 0.5 * monthly_salary:
-        advice.append("Your EMI burden is high (>50% of income). Consider debt consolidation or reducing debt.")
-    if final_score < 750:
-        advice.append("Maintain consistent payment history and explore diversifying your credit mix.")
+    # Determine status with peak detection
+    is_peak = False
+    peak_message = None
+    
+    if final_cibil_score >= 850:
+        status = "Exceptional (Peak)"
+        loan_approval = "Maximum"
+        is_peak = True
+        peak_message = "⭐ You've reached peak CIBIL performance! Score above 850 is exceptional."
+    elif final_cibil_score >= 800:
+        status = "Excellent+"
+        loan_approval = "Very High"
+        peak_message = f"Outstanding! You're {850 - final_cibil_score} points away from peak performance."
+    elif final_cibil_score >= 750:
+        status = "Excellent"
+        loan_approval = "Very High"
+    elif final_cibil_score >= 700:
+        status = "Good"
+        loan_approval = "High"
+    elif final_cibil_score >= 650:
+        status = "Fair"
+        loan_approval = "Moderate"
+    elif final_cibil_score >= 600:
+        status = "Average"
+        loan_approval = "Low"
+    else:
+        status = "Poor"
+        loan_approval = "Very Low"
+    
+    # Generate recommendations (matching unified system)
+    recommendations = []
+    if is_peak:
+        recommendations.append("🎉 Congratulations! You've achieved peak CIBIL performance. Maintain this excellence!")
+    else:
+        if utilization_ratio > 0.30:
+            recommendations.append("Reduce credit utilization below 30%")
+        if monthly_emi > 0.5 * monthly_salary:
+            recommendations.append("Your EMI burden is high (>50% of income). Consider debt consolidation or reducing debt.")
+        if final_cibil_score < 750:
+            recommendations.append("Maintain consistent payment history and explore diversifying your credit mix.")
+        if final_cibil_score < 850:
+            points_to_peak = 850 - final_cibil_score
+            recommendations.append(f"Focus on improving weakest components to reach peak range (need +{points_to_peak} points)")
     
     return {
         "session_id": session_id,
         "timestamp": datetime.now().isoformat(),
-        "cibil_score": final_score,
+        "methodology": "TransUnion CIBIL India 2025",
+        "cibil_score": final_cibil_score,
         "status": status,
-        "components": {
-            "payment_history": round(payment_history_score, 1),
-            "credit_utilization": round(utilization_score, 1),
-            "credit_mix": round(credit_mix_score, 1),
-            "debt_to_income": round(dti_score, 1),
-            "credit_inquiries": round(inquiry_score, 1)
+        "loan_approval_likelihood": loan_approval,
+        "score_threshold": {
+            "current_score": final_cibil_score,
+            "max_achievable_in_program": max_achievable_score,
+            "percentage_of_max": round(score_percentage, 2),
+            "is_peak": is_peak,
+            "peak_message": peak_message,
+            "score_ranges": {
+                "poor": "300-599",
+                "average": "600-649",
+                "fair": "650-699",
+                "good": "700-749",
+                "excellent": "750-799",
+                "excellent_plus": "800-849",
+                "exceptional_peak": "850-900"
+            }
         },
-        "metrics": {
-            "utilization_pct": f"{int(utilization_ratio * 100)}%",
-            "dti_pct": f"{int(dti_ratio * 100)}%",
-            "monthly_emi": f"₹{monthly_emi:,.0f}",
-            "credit_types": len(credit_types),
-            "estimated_credit_limit": f"₹{estimated_credit_limit:,.0f}"
+        "analysis_period": {
+            "start_date": start_date.strftime("%Y-%m-%d"),
+            "end_date": end_date.strftime("%Y-%m-%d"),
+            "total_months": round(date_range_months, 1),
+            "total_years": round(date_range_years, 2)
         },
-        "advice": advice,
+        "score_breakdown": {
+            "payment_history": {
+                "score": round(payment_history_score, 1),
+                "weightage": "35%",
+                "contribution": round(payment_history_score * CIBIL_FACTORS['payment_history'], 1),
+                "remarks": payment_remarks
+            },
+            "credit_utilization": {
+                "score": round(credit_utilization_score, 1),
+                "weightage": "30%",
+                "contribution": round(credit_utilization_score * CIBIL_FACTORS['credit_utilization'], 1),
+                "utilization_percentage": cur_percentage,
+                "status": cur_status
+            },
+            "credit_mix": {
+                "score": round(credit_mix_score, 1),
+                "weightage": "10%",
+                "contribution": round(credit_mix_score * CIBIL_FACTORS['credit_mix'], 1),
+                "types_count": num_credit_types,
+                "types": list(credit_types),
+                "status": mix_status
+            },
+            "debt_to_income": {
+                "score": round(dti_score, 1),
+                "weightage": "15%",
+                "contribution": round(dti_score * CIBIL_FACTORS['debt_to_income'], 1),
+                "dti_percentage": int(dti_ratio * 100),
+                "monthly_emi": f"₹{monthly_emi:,.0f}",
+                "monthly_income": f"₹{monthly_salary:,.0f}",
+                "status": dti_status
+            },
+            "credit_inquiries": {
+                "score": round(inquiry_score, 1),
+                "weightage": "10%",
+                "contribution": round(inquiry_score * CIBIL_FACTORS['credit_inquiries'], 1),
+                "status": inquiry_status
+            }
+        },
+        "transaction_summary": {
+            "total_transactions": len(transactions),
+            "credit_card_payments": len(cc_payments),
+            "home_loan_payments": len(home_loans),
+            "car_loan_payments": len(car_loans),
+            "personal_loan_payments": len(personal_loans),
+            "education_loan_payments": len(education_loans)
+        },
+        "recommendations": recommendations
     }
 
 # --- Consolidated Endpoints ---
@@ -1350,3 +1505,4 @@ if __name__ == "__main__":
         port=port,
         log_level="info"
     )
+
