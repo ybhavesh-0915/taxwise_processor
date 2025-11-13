@@ -22,6 +22,7 @@ import random
 # Removed: import numpy (no longer needed for charting)
 
 # --- Configuration: All Tax Rules, Slabs, and Limits ---
+ses = random.randint(50,150)
 TAX_CONFIG: Dict[str, Any] = {
     'cess_rate': 0.04,
     'deductions': {
@@ -377,7 +378,7 @@ def generate_mock_transactions(filename: str, count: int = 0) -> List[Dict[str, 
 
 
 # --- Core Data Processing Logic ---
-
+i = ses
 def process_csv_optimized(file_content: bytes, filename: str) -> List[ProcessedTransaction]:
     """Railway-optimized CSV processing"""
     encodings = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']
@@ -935,7 +936,7 @@ def unified_analyze_cibil(data: Dict) -> Dict[str, Any]:
         dti_score * CIBIL_FACTORS['debt_to_income'] +
         inquiry_score * CIBIL_FACTORS['credit_inquiries']
     )
-    final_score = int(random.randint(0 , 100)+ (raw_score / 100.0) * 600)
+    final_score = int( i + (raw_score / 100.0) * 600)
     
     # Determine status
     status = next((info['status'] for info in SCORE_RANGES.values() 
@@ -1349,6 +1350,7 @@ if __name__ == "__main__":
         port=port,
         log_level="info"
     )
+
 
 
 
